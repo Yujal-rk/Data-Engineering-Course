@@ -14,11 +14,11 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 SOURCE_DB_CONFIG = dict(
-    host=    os.getenv("DB_HOST"),
-    port =   os.getenv("DB_PORT"),
-    dbname = os.getenv("DB_NAME"),
-    user=    os.getenv("DB_USER"),
-    password=os.getenv("DB_PASSWORD")
+    host=    os.getenv("SRC_DB_HOST"),
+    port =   os.getenv("SRC_DB_PORT"),
+    dbname = os.getenv("SRC_DB_NAME"),
+    user=    os.getenv("SRC_DB_USER"),
+    password=os.getenv("SRC_DB_PASSWORD")
 )
 DEST_DB_CONFIG = dict(
     host=    os.getenv("DEST_DB_HOST"),
@@ -255,12 +255,57 @@ def load_dim_promo_code(conn, promo_code_data):
         logger.error(str(e))
         raise
 
+
+def extract_vehicle(conn):
+    extract_vehicle_sql = """
+    SELECT
+        vehicle_id,
+        plate_number,
+        make,
+        model,
+        year,
+        color,
+        category,
+        is_active
+    FROM
+        vehicles v;
+    """
+    return extract(conn, extract_vehicle_sql)
+
+
+def load_dim_vehicle(conn, vehicle_data):
+    insert_dim_vehicle_sql = """
+ INSERT INTO dim_vehicle
+    (vehicle_id, plate_number, make, model, year, color, category, is_active)
+    VALUES ( %(vehicle_id)s,
+             %(plate_number)s,
+             %(make)s,
+             %(model)s,
+             %(year)s,
+             %(color)s,
+             %(category)s,
+             %(is_active)s
+            )
+    ON CONFLICT (vehicle_id) DO NOTHING
+"""
+    try:
+        with conn.cursor() as curr:
+            curr.executemany(insert_dim_vehicle_sql, vehicle_data)
+            logger.info(f"{curr.rowcount} inserted to dim_vehicle")
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        logger.error(str(e))
+        raise
+
+
 def extract_trips(conn):
     extract_trip_sql = """
       SELECT
         t.trip_id,
         t.driver_id,
         t.passenger_id,
+        t.vehicle_id,
         t.pickup_location_id,
         t.dropoff_location_id,
         t.payment_method_id,
@@ -300,6 +345,12 @@ def load_lookup_dim(conn):
 
         curr.execute("SELECT promo_code_id, promo_code_key FROM dim_promo_code")
         lookup["promo_code"] = {r[0]:r[1] for r in curr.fetchall()}
+
+        curr.execute("SELECT vehicle_id, vehicle_key FROM dim_vehicle")
+        lookup["vehicle"] = {r[0]:r[1] for r in curr.fetchall()}
+
+        curr.execute("SELECT time_key FROM dim_time")
+        lookup["time"] = {r[0]: True for r in curr.fetchall()}
 
         curr.execute("SELECT date_key FROM dim_date")
         lookup["date"] = {r[0]: True for r in curr.fetchall()}
@@ -342,6 +393,26 @@ def transform(oltp_row, lookups):
             skipped += 1
             continue
 
+        # vehicle_key lookup
+        vehicle_key = None
+        if row["vehicle_id"] is not None:
+            vehicle_key = lookups["vehicle"].get(row["vehicle_id"])
+            if vehicle_key is None:
+                logger.warning(f"trip {trip_id}: vehicle_id {row['vehicle_id']} not in dim_vehicle — skipped")
+                skipped += 1
+                continue
+
+        # time_key: round requested_at down to nearest 15-minute bucket
+        # Example: 14:37 → 1430, 14:45 → 1445
+        requested_hour = row["requested_at"].hour
+        requested_minute = row["requested_at"].minute
+        bucket_minute = (requested_minute // 15) * 15  # 0, 15, 30, or 45
+        time_key = requested_hour * 100 + bucket_minute
+        if time_key not in lookups["time"]:
+            logger.warning(f"trip {trip_id}: time_key {time_key} not in dim_time — skipped")
+            skipped += 1
+            continue
+
         # payment_method_id / promo_code_id are nullable in trips (e.g. no_show trips
         # have no payment method) and fact_trips allows NULL for both — only look
         # up and skip when the OLTP row actually has a value.
@@ -380,6 +451,8 @@ def transform(oltp_row, lookups):
             "passenger_key":        passenger_key,
             "pickup_location_key":  pickup_location_key,
             "dropoff_location_key": dropoff_location_key,
+            "vehicle_key":          vehicle_key,
+            "time_key":             time_key,
             "payment_method_key":   payment_method_key,
             "promo_code_key":       promo_code_key,
             "base_fare":            base_fare,
@@ -403,6 +476,7 @@ def load_fact_trips(conn, fact_data):
  INSERT INTO fact_trips
     (source_trip_id, date_key, driver_key, passenger_key,
      pickup_location_key, dropoff_location_key,
+     vehicle_key, time_key,
      payment_method_key, promo_code_key,
      base_fare, tip_amount, discount_amount, fare_amount,
      distance_km, duration_minutes,
@@ -414,6 +488,8 @@ def load_fact_trips(conn, fact_data):
              %(passenger_key)s,
              %(pickup_location_key)s,
              %(dropoff_location_key)s,
+             %(vehicle_key)s,
+             %(time_key)s,
              %(payment_method_key)s,
              %(promo_code_key)s,
              %(base_fare)s,
@@ -465,6 +541,9 @@ def main():
         promo_code_data = extract_promo_code(src_conn)
         load_dim_promo_code(dst_conn, promo_code_data)
 
+        vehicle_data = extract_vehicle(src_conn)
+        load_dim_vehicle(dst_conn, vehicle_data)
+
         lookups = load_lookup_dim(dst_conn)
         rows = extract_trips(src_conn)
         fact_rows = transform(rows, lookups)
@@ -477,4 +556,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

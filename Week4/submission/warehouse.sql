@@ -1,3 +1,13 @@
+DROP TABLE IF EXISTS fact_trips CASCADE;
+DROP TABLE IF EXISTS dim_date CASCADE;
+DROP TABLE IF EXISTS dim_time CASCADE;
+DROP TABLE IF EXISTS dim_driver CASCADE;
+DROP TABLE IF EXISTS dim_passenger CASCADE;
+DROP TABLE IF EXISTS dim_location CASCADE;
+DROP TABLE IF EXISTS dim_payment_method CASCADE;
+DROP TABLE IF EXISTS dim_promo_code CASCADE;
+DROP TABLE IF EXISTS dim_vehicle CASCADE;
+
 CREATE TABLE dim_date (
     date_key        INTEGER      PRIMARY KEY,      -- e.g. 20240315
     full_date       DATE         NOT NULL UNIQUE,
@@ -74,6 +84,17 @@ CREATE TABLE dim_promo_code (
     is_active       BOOLEAN
 );
 
+CREATE TABLE dim_vehicle (
+    vehicle_key     SERIAL       PRIMARY KEY,
+    vehicle_id      INTEGER      NOT NULL UNIQUE,  -- natural key from OLTP
+    plate_number    VARCHAR(20)  NOT NULL,
+    make            VARCHAR(50)  NOT NULL,
+    model           VARCHAR(50)  NOT NULL,
+    year            SMALLINT,
+    color           VARCHAR(30),
+    category        VARCHAR(30)  NOT NULL,
+    is_active       BOOLEAN      NOT NULL
+);
 
 CREATE TABLE fact_trips (
     trip_key                SERIAL          PRIMARY KEY,
@@ -87,7 +108,9 @@ CREATE TABLE fact_trips (
     dropoff_location_key    INTEGER         NOT NULL REFERENCES dim_location(location_key),
     payment_method_key      INTEGER         REFERENCES dim_payment_method(payment_method_key),
     promo_code_key          INTEGER         REFERENCES dim_promo_code(promo_code_key),
- 
+ 	vehicle_key             INTEGER         NOT NULL REFERENCES dim_vehicle(vehicle_key),
+    time_key                INTEGER         NOT NULL REFERENCES dim_time(time_key),
+    
     -- ── Additive measures ───────────────────────────────────────────────────
     base_fare               NUMERIC(10,2),
     tip_amount              NUMERIC(8,2)    NOT NULL DEFAULT 0.00,
@@ -160,3 +183,22 @@ FROM
     generate_series(0, 23) AS h,
     generate_series(0, 45, 15) AS m
 ORDER BY h, m;
+
+
+SELECT table_name FROM information_schema.tables 
+WHERE table_schema = 'public' 
+ORDER BY table_name;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
